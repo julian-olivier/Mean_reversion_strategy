@@ -1,0 +1,8 @@
+Ask him to build a mean reversion stat ARB strategy, if he has nothing to do.
+- Run clustering on top 100
+- Test for cointegration
+- Run Dicky-Fuller test for stationarity
+- Trade at different deviations from the mean
+- Close position when it reverses to the mean, stops out, or runs for too long.
+ 
+Will also be interested to see how "consistent" the D-F results are in and out of sample, ie if a pair is supposed to be stationary, does it remain stationary
