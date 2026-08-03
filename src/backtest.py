@@ -1,7 +1,8 @@
 import numpy as np
 import pandas as pd
 import yfinance as yf
-from src.cointegration import calculate_spread
+from src.cointegration import calculate_spread, find_cointegrated_pairs, select_top_distinct_pairs
+from src.cluster import extract_features, cluster_assets, get_cluster_groups
 from src.strategy import fit_vasicek_model
 
 
@@ -709,4 +710,322 @@ def calculate_portfolio_vs_benchmark_metrics(
     }
 
     return summary_dict
+
+
+def run_dynamic_multi_pair_portfolio_backtest(
+    prices: pd.DataFrame,
+    lookback_window: int = 252,
+    reselect_frequency: int = 63,
+    max_pairs: int = 10,
+    entry_z: float = 2.0,
+    stop_z: float = 3.5,
+    max_holding_days: int = 20,
+    transaction_cost: float = 0.0005,
+    rebalance_threshold: float = 0.05,
+    pca_components: int = 5,
+    min_cluster_size: int = 2,
+    train_ratio: float = 0.7,
+    use_out_of_sample_only: bool = True,
+    verbose: bool = False
+) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
+    """
+    Backtests a dynamic rolling multi-pair statistical arbitrage portfolio:
+      - Periodically (every `reselect_frequency` days), uses historical prices over `lookback_window` to:
+        1. Extract PCA features and cluster top 100 assets.
+        2. Test intra-cluster cointegration and select top `max_pairs` distinct pairs.
+        3. Fit hedge ratios (beta, alpha) and Vasicek mean-reversion parameters.
+      - Simulates portfolio execution out-of-sample across rolling periods.
+      - Capital weighting is proportional to the ADF stationarity statistic of active pairs.
+      - Dynamic rebalancing is triggered when weight drift exceeds `rebalance_threshold` or active position set changes.
+      - Open trades in dropped pairs are allowed to run to natural exit, but no new entries occur for dropped pairs.
+      - If `use_out_of_sample_only` is True, results are strictly filtered to the remaining (1 - train_ratio) out-of-sample period.
+
+    Returns: (portfolio_df, all_trades_df, metrics_dict)
+    """
+    if len(prices) <= lookback_window:
+        raise ValueError(f"Price matrix length ({len(prices)}) must be greater than lookback_window ({lookback_window}).")
+
+    common_idx = prices.index
+    eval_idx = common_idx[lookback_window:]
+
+    # State containers
+    portfolio_val = 1.0
+    portfolio_equity = []
+    rebalance_count = 0
+    total_rebalance_costs = 0.0
+    all_trades = []
+
+    # Map of key -> dict holding state for pairs currently tracked
+    tracked_pairs = {}
+    active_target_pairs = set()  # set of keys currently in top N selection
+    current_active_weights = {}
+
+    port_df = pd.DataFrame(index=eval_idx)
+    port_df['Equity'] = 1.0
+    port_df['Active_Pairs'] = 0
+    port_df['Active_Long_Legs'] = 0
+    port_df['Active_Short_Legs'] = 0
+    port_df['Active_Legs'] = 0
+    port_df['Rebalance_Triggered'] = False
+    port_df['Selected_Top_Pairs_Count'] = 0
+
+    for step, i in enumerate(range(lookback_window, len(common_idx))):
+        date = common_idx[i]
+
+        # 1. Check for Period Re-Selection
+        is_reselect_day = ((i - lookback_window) % reselect_frequency == 0)
+
+        if is_reselect_day:
+            hist_prices = prices.iloc[i - lookback_window : i]
+            try:
+                cluster_df = cluster_assets(hist_prices, n_clusters=10, n_components=pca_components)
+                coint_df = find_cointegrated_pairs(hist_prices, cluster_df, min_cluster_size=min_cluster_size)
+                top_pairs_df = select_top_distinct_pairs(coint_df, max_pairs=max_pairs)
+            except Exception as e:
+                if verbose:
+                    print(f"Warning on date {date.strftime('%Y-%m-%d')}: Re-selection error ({e}). Keeping previous selection.")
+                top_pairs_df = pd.DataFrame()
+
+            new_target_keys = set()
+            if not top_pairs_df.empty:
+                for _, row in top_pairs_df.iterrows():
+                    sy, sx = row['Stock_Y'], row['Stock_X']
+                    pair_key = (sy, sx)
+                    new_target_keys.add(pair_key)
+
+                    s_y_in = hist_prices[sy].dropna()
+                    s_x_in = hist_prices[sx].dropna()
+                    p_idx = s_y_in.index.intersection(s_x_in.index)
+
+                    spread_in, beta, alpha = calculate_spread(s_y_in.loc[p_idx], s_x_in.loc[p_idx])
+                    vas_params = fit_vasicek_model(spread_in)
+
+                    theta = vas_params['theta']
+                    kappa = vas_params['kappa']
+                    sigma = vas_params['sigma']
+                    sigma_eq = sigma / np.sqrt(2.0 * max(kappa, 1e-6)) if kappa > 0 else spread_in.std()
+
+                    if pair_key not in tracked_pairs:
+                        tracked_pairs[pair_key] = {
+                            'stock_y': sy,
+                            'stock_x': sx,
+                            'position': 0,
+                            'holding_days': 0,
+                            'entry_date': None,
+                            'entry_z': 0.0,
+                            'entry_spread': 0.0,
+                            'entry_capital': 0.0
+                        }
+
+                    # Update model parameters for current period
+                    tracked_pairs[pair_key].update({
+                        'beta': beta,
+                        'alpha': alpha,
+                        'adf_stat': row['ADF_Stat'],
+                        'adf_pvalue': row['ADF_PValue'],
+                        'theta': theta,
+                        'sigma_eq': sigma_eq
+                    })
+
+            active_target_pairs = new_target_keys
+
+        # 2. Daily Simulation over tracked pairs
+        active_positions_pairs = []
+        entry_exit_occurred = False
+        daily_spread_returns = {}
+
+        # Clean up tracked_pairs that are no longer target and have position == 0
+        keys_to_remove = [
+            pk for pk, p in tracked_pairs.items()
+            if pk not in active_target_pairs and p['position'] == 0
+        ]
+        for pk in keys_to_remove:
+            del tracked_pairs[pk]
+
+        for pair_key, p in tracked_pairs.items():
+            sy, sx = p['stock_y'], p['stock_x']
+            beta = p['beta']
+            alpha = p['alpha']
+            theta = p['theta']
+            sigma_eq = p['sigma_eq']
+            pos = p['position']
+
+            s_y_curr, s_y_prev = prices[sy].iloc[i], prices[sy].iloc[i-1]
+            s_x_curr, s_x_prev = prices[sx].iloc[i], prices[sx].iloc[i-1]
+
+            delta_y = s_y_curr - s_y_prev
+            delta_x = s_x_curr - s_x_prev
+            capital_prev = s_y_prev + abs(beta) * s_x_prev
+
+            if pos == 1:
+                spread_ret = (delta_y - beta * delta_x) / capital_prev
+            elif pos == -1:
+                spread_ret = (-delta_y + beta * delta_x) / capital_prev
+            else:
+                spread_ret = 0.0
+
+            daily_spread_returns[pair_key] = spread_ret
+
+            spread_curr = s_y_curr - (beta * s_x_curr + alpha)
+            z_curr = (spread_curr - theta) / (sigma_eq + 1e-8)
+
+            exit_triggered = False
+            exit_reason = None
+
+            if pos != 0:
+                p['holding_days'] += 1
+                if (pos == 1 and z_curr >= 0.0) or (pos == -1 and z_curr <= 0.0):
+                    exit_triggered = True
+                    exit_reason = 'Mean_Reversion'
+                elif (pos == 1 and z_curr <= -stop_z) or (pos == -1 and z_curr >= stop_z):
+                    exit_triggered = True
+                    exit_reason = 'Stop_Loss'
+                elif p['holding_days'] >= max_holding_days:
+                    exit_triggered = True
+                    exit_reason = 'Max_Duration'
+
+            if exit_triggered:
+                capital_entry = p['entry_capital']
+                trade_ret = (spread_curr - p['entry_spread']) / (capital_entry + 1e-8) if pos == 1 else (p['entry_spread'] - spread_curr) / (capital_entry + 1e-8)
+                trade_ret -= transaction_cost * 2
+                all_trades.append({
+                    'Stock_Y': sy,
+                    'Stock_X': sx,
+                    'Entry_Date': p['entry_date'],
+                    'Exit_Date': date,
+                    'Position': 'Long' if pos == 1 else 'Short',
+                    'Entry_Z': p['entry_z'],
+                    'Exit_Z': z_curr,
+                    'Return': trade_ret,
+                    'Holding_Days': p['holding_days'],
+                    'Exit_Reason': exit_reason
+                })
+                p['position'] = 0
+                p['holding_days'] = 0
+                entry_exit_occurred = True
+            elif pos == 0 and pair_key in active_target_pairs:
+                # Check Entry conditions only if pair is currently in target selection
+                if z_curr <= -entry_z:
+                    p['position'] = 1
+                    p['entry_date'] = date
+                    p['entry_z'] = z_curr
+                    p['entry_spread'] = spread_curr
+                    p['entry_capital'] = s_y_curr + abs(beta) * s_x_curr
+                    p['holding_days'] = 0
+                    entry_exit_occurred = True
+                elif z_curr >= entry_z:
+                    p['position'] = -1
+                    p['entry_date'] = date
+                    p['entry_z'] = z_curr
+                    p['entry_spread'] = spread_curr
+                    p['entry_capital'] = s_y_curr + abs(beta) * s_x_curr
+                    p['holding_days'] = 0
+                    entry_exit_occurred = True
+
+            if p['position'] != 0:
+                active_positions_pairs.append(pair_key)
+
+        # 3. Capital Allocation and Rebalancing
+        rebalance_today = False
+        rebalance_cost = 0.0
+
+        active_adf_sum = sum(abs(tracked_pairs[pk]['adf_stat']) for pk in active_positions_pairs) if len(active_positions_pairs) > 0 else 0.0
+        target_weights = {
+            pk: (abs(tracked_pairs[pk]['adf_stat']) / active_adf_sum if active_adf_sum > 0 and pk in active_positions_pairs else 0.0)
+            for pk in tracked_pairs.keys()
+        }
+
+        weight_drift = 0.0
+        if len(active_positions_pairs) > 0:
+            for pk in active_positions_pairs:
+                curr_w = current_active_weights.get(pk, 0.0)
+                targ_w = target_weights[pk]
+                weight_drift = max(weight_drift, abs(targ_w - curr_w))
+
+        if entry_exit_occurred or (len(active_positions_pairs) > 0 and weight_drift >= rebalance_threshold):
+            rebalance_today = True
+            rebalance_count += 1
+
+            turnover = sum(abs(target_weights[pk] - current_active_weights.get(pk, 0.0)) for pk in tracked_pairs.keys())
+            rebalance_cost = turnover * transaction_cost
+            total_rebalance_costs += rebalance_cost
+
+            current_active_weights = target_weights.copy()
+
+        daily_port_return = 0.0
+        if len(active_positions_pairs) > 0:
+            for pk in active_positions_pairs:
+                w = current_active_weights.get(pk, 1.0 / len(active_positions_pairs))
+                daily_port_return += w * daily_spread_returns[pk]
+
+        if rebalance_today:
+            daily_port_return -= rebalance_cost
+
+        portfolio_val *= (1.0 + daily_port_return)
+        portfolio_equity.append(portfolio_val)
+
+        long_stocks = set()
+        short_stocks = set()
+        for pk in active_positions_pairs:
+            pos = tracked_pairs[pk]['position']
+            beta = tracked_pairs[pk]['beta']
+            sy, sx = tracked_pairs[pk]['stock_y'], tracked_pairs[pk]['stock_x']
+            if pos == 1:
+                long_stocks.add(sy)
+                if beta > 0:
+                    short_stocks.add(sx)
+                else:
+                    long_stocks.add(sx)
+            elif pos == -1:
+                short_stocks.add(sy)
+                if beta > 0:
+                    long_stocks.add(sx)
+                else:
+                    short_stocks.add(sx)
+
+        n_long = len(long_stocks)
+        n_short = len(short_stocks)
+        n_legs = n_long + n_short
+
+        port_df.loc[date, 'Equity'] = portfolio_val
+        port_df.loc[date, 'Active_Pairs'] = len(active_positions_pairs)
+        port_df.loc[date, 'Active_Long_Legs'] = n_long
+        port_df.loc[date, 'Active_Short_Legs'] = n_short
+        port_df.loc[date, 'Active_Legs'] = n_legs
+        port_df.loc[date, 'Rebalance_Triggered'] = rebalance_today
+        port_df.loc[date, 'Selected_Top_Pairs_Count'] = len(active_target_pairs)
+
+    equity_series = pd.Series(portfolio_equity, index=eval_idx)
+    trades_df = pd.DataFrame(all_trades)
+    port_df['Equity'] = equity_series
+
+    # Apply Out-of-Sample Slicing if use_out_of_sample_only is True
+    split_idx = int(len(common_idx) * train_ratio) if (use_out_of_sample_only and train_ratio < 1.0) else 0
+
+    if split_idx > 0 and split_idx > lookback_window:
+        eval_oos_idx = common_idx[split_idx:]
+        oos_equity = port_df.loc[eval_oos_idx, 'Equity']
+        oos_equity_norm = oos_equity / oos_equity.iloc[0]
+
+        oos_port_df = port_df.loc[eval_oos_idx].copy()
+        oos_port_df['Equity'] = oos_equity_norm
+
+        if not trades_df.empty:
+            oos_trades_df = trades_df[trades_df['Exit_Date'] >= eval_oos_idx[0]].copy()
+        else:
+            oos_trades_df = trades_df.copy()
+
+        metrics = calculate_performance_metrics(oos_equity_norm, oos_trades_df)
+        metrics['Rebalance_Count'] = int(port_df.loc[eval_oos_idx, 'Rebalance_Triggered'].sum())
+        metrics['Total_Rebalance_Costs'] = total_rebalance_costs
+        metrics['Total_Active_Pairs_Tested'] = len(tracked_pairs)
+
+        return oos_port_df, oos_trades_df, metrics
+
+    metrics = calculate_performance_metrics(equity_series, trades_df)
+    metrics['Rebalance_Count'] = rebalance_count
+    metrics['Total_Rebalance_Costs'] = total_rebalance_costs
+    metrics['Total_Active_Pairs_Tested'] = len(tracked_pairs)
+
+    return port_df, trades_df, metrics
 

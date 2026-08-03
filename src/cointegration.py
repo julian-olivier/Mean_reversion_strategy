@@ -53,7 +53,8 @@ def find_cointegrated_pairs(
     prices: pd.DataFrame,
     cluster_df: pd.DataFrame = None,
     p_value_threshold: float = 0.05,
-    max_pairs_per_cluster: int = 50
+    max_pairs_per_cluster: int = 50,
+    min_cluster_size: int = 2
 ) -> pd.DataFrame:
     """
     Searches intra-cluster stock pairs for statistically significant cointegration.
@@ -65,7 +66,7 @@ def find_cointegrated_pairs(
         groups = get_cluster_groups(cluster_df)
         pair_candidates = []
         for c_id, tickers in groups.items():
-            if c_id == -1 or len(tickers) < 2:  # Skip noise/unclustered or singletons
+            if c_id == -1 or len(tickers) < min_cluster_size:  # Skip noise/unclustered or small clusters
                 continue
             pair_candidates.extend(list(itertools.combinations(tickers, 2)))
     else:

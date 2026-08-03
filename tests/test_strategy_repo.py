@@ -13,6 +13,7 @@ from src.backtest import (
     run_pair_backtest,
     sweep_entry_deviations,
     run_multi_pair_portfolio_backtest,
+    run_dynamic_multi_pair_portfolio_backtest,
     calculate_portfolio_vs_benchmark_metrics
 )
 
@@ -162,6 +163,23 @@ def test_multi_pair_portfolio_backtest(synthetic_prices):
     assert 'comparison_df' in comp_res
 
 
+def test_dynamic_multi_pair_portfolio_backtest(synthetic_prices):
+    port_df, trades_df, metrics = run_dynamic_multi_pair_portfolio_backtest(
+        prices=synthetic_prices,
+        lookback_window=100,
+        reselect_frequency=30,
+        max_pairs=2,
+        entry_z=1.5,
+        stop_z=3.0,
+        train_ratio=0.6,
+        use_out_of_sample_only=True
+    )
+
+    assert 'Equity' in port_df.columns
+    assert 'Selected_Top_Pairs_Count' in port_df.columns
+    assert metrics['Total_Return'] is not None
+
+
 if __name__ == '__main__':
     synthetic_df = synthetic_prices()
     print("Running test_cluster_module...")
@@ -176,5 +194,8 @@ if __name__ == '__main__':
     test_sortino_ratio_robustness()
     print("Running test_multi_pair_portfolio_backtest...")
     test_multi_pair_portfolio_backtest(synthetic_df)
-    print("\nALL 6 TEST SUITE VERIFICATIONS PASSED SUCCESSFULLY!")
+    print("Running test_dynamic_multi_pair_portfolio_backtest...")
+    test_dynamic_multi_pair_portfolio_backtest(synthetic_df)
+    print("\nALL 7 TEST SUITE VERIFICATIONS PASSED SUCCESSFULLY!")
+
 

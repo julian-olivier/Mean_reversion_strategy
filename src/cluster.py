@@ -140,7 +140,8 @@ def cluster_assets(
     prices: pd.DataFrame,
     method: str = 'agglomerative',
     n_clusters: int = 10,
-    distance_threshold: float = None
+    distance_threshold: float = None,
+    n_components: int = 5
 ) -> pd.DataFrame:
     """
     Runs clustering on top 100 stock price return profiles.
@@ -158,7 +159,7 @@ def cluster_assets(
     # Correlation distance matrix: D = sqrt(2 * (1 - correlation))
     dist_matrix = np.sqrt(np.maximum(0, 2 * (1 - corr_matrix.values)))
 
-    feature_df, _ = extract_features(prices, n_components=5)
+    feature_df, _ = extract_features(prices, n_components=n_components)
 
     if method == 'agglomerative':
         clusterer = AgglomerativeClustering(
