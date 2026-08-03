@@ -195,3 +195,40 @@ def evaluate_universe_df_consistency(
     }
 
     return results_df, summary_stats
+
+
+def select_top_distinct_pairs(
+    cointegrated_df: pd.DataFrame,
+    max_pairs: int = 10,
+    allow_stock_reuse: bool = False
+) -> pd.DataFrame:
+    """
+    Selects top cointegrated pairs sorted by ADF statistical significance (most negative ADF_Stat / lowest ADF_PValue).
+    If allow_stock_reuse is False, ensures each stock appears in at most one pair to prevent asset concentration.
+    """
+    if cointegrated_df.empty:
+        return pd.DataFrame()
+
+    # Sort by strongest ADF stationarity (lowest ADF_Stat / lowest PValue)
+    sorted_df = cointegrated_df.sort_values(by=['ADF_Stat', 'ADF_PValue'], ascending=[True, True]).reset_index(drop=True)
+
+    if allow_stock_reuse:
+        return sorted_df.head(max_pairs)
+
+    selected_rows = []
+    used_stocks = set()
+
+    for _, row in sorted_df.iterrows():
+        stock_y = row['Stock_Y']
+        stock_x = row['Stock_X']
+
+        if stock_y not in used_stocks and stock_x not in used_stocks:
+            selected_rows.append(row)
+            used_stocks.add(stock_y)
+            used_stocks.add(stock_x)
+
+        if len(selected_rows) >= max_pairs:
+            break
+
+    return pd.DataFrame(selected_rows).reset_index(drop=True)
+

@@ -22,7 +22,7 @@ DEFAULT_TOP_100_TICKERS = [
 
 def fetch_top_100_data(
     tickers: list = None,
-    period: str = "2y",
+    period: str = "10y",
     cache_path: str = "data/top_100_prices.csv"
 ) -> pd.DataFrame:
     """
