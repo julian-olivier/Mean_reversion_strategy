@@ -18,13 +18,14 @@ def calculate_performance_metrics(
     n_days = len(equity_curve)
 
     if n_days > 1:
-        ann_return = (1.0 + total_return) ** (252.0 / n_days) - 1.0
+        ann_return = (max(0.0, 1.0 + total_return)) ** (252.0 / n_days) - 1.0
         ann_vol = daily_returns.std() * np.sqrt(252)
         rf_daily = (1 + risk_free_rate) ** (1 / 252) - 1
         excess_ret = daily_returns - rf_daily
         sharpe_ratio = (excess_ret.mean() / (daily_returns.std() + 1e-8)) * np.sqrt(252)
 
-        downside_std = daily_returns[daily_returns < 0].std() * np.sqrt(252)
+        downside_diff = np.minimum(0.0, excess_ret)
+        downside_std = np.sqrt(np.mean(downside_diff ** 2)) * np.sqrt(252)
         sortino_ratio = (ann_return - risk_free_rate) / (downside_std + 1e-8)
     else:
         ann_return = ann_vol = sharpe_ratio = sortino_ratio = 0.0
@@ -117,7 +118,7 @@ def run_pair_backtest(
     sigma_eq = sigma / np.sqrt(2.0 * max(kappa, 1e-6)) if kappa > 0 else spread.std()
     z_score = (spread - theta) / (sigma_eq + 1e-8)
 
-    eval_idx = common_idx[split_idx:] if split_idx > 0 else common_idx
+    eval_idx = common_idx[split_idx:] if split_idx > 0 else common_idx[1:]
 
     portfolio_value = 1.0
     equity = []
@@ -304,7 +305,7 @@ def fetch_spx_benchmark(price_index: pd.DatetimeIndex, ticker: str = '^GSPC') ->
         df = yf.download(ticker, start=start_date, end=end_date, progress=False, auto_adjust=True)
         if isinstance(df.columns, pd.MultiIndex):
             if 'Close' in df.columns.get_level_values(0):
-                spx = df['Close'].iloc[:, 0]
+                spx = df['Close']
             else:
                 spx = df.iloc[:, 0]
         elif 'Close' in df.columns:
@@ -312,7 +313,10 @@ def fetch_spx_benchmark(price_index: pd.DatetimeIndex, ticker: str = '^GSPC') ->
         elif 'Adj Close' in df.columns:
             spx = df['Adj Close']
         else:
-            spx = df.iloc[:, 0]
+            spx = df
+
+        if isinstance(spx, pd.DataFrame):
+            spx = spx.iloc[:, 0]
 
         spx = spx.reindex(price_index).ffill().bfill()
         spx_normalized = spx / spx.iloc[0]
@@ -383,10 +387,10 @@ def run_multi_pair_portfolio_backtest(
         z_score = (spread - theta) / (sigma_eq + 1e-8)
 
         # Align with common_idx
-        spread = spread.reindex(common_idx).ffill()
-        z_score = z_score.reindex(common_idx).ffill()
-        s_y = s_y.reindex(common_idx).ffill()
-        s_x = s_x.reindex(common_idx).ffill()
+        spread = spread.reindex(common_idx).ffill().bfill()
+        z_score = z_score.reindex(common_idx).ffill().bfill()
+        s_y = s_y.reindex(common_idx).ffill().bfill()
+        s_x = s_x.reindex(common_idx).ffill().bfill()
 
         pair_data[pair_key] = {
             'stock_y': sy,
@@ -557,13 +561,20 @@ def run_multi_pair_portfolio_backtest(
         short_stocks = set()
         for pk in active_pairs:
             pos = pair_data[pk]['position']
+            beta = pair_data[pk]['beta']
             sy, sx = pair_data[pk]['stock_y'], pair_data[pk]['stock_x']
             if pos == 1:
                 long_stocks.add(sy)
-                short_stocks.add(sx)
+                if beta > 0:
+                    short_stocks.add(sx)
+                else:
+                    long_stocks.add(sx)
             elif pos == -1:
                 short_stocks.add(sy)
-                long_stocks.add(sx)
+                if beta > 0:
+                    long_stocks.add(sx)
+                else:
+                    short_stocks.add(sx)
 
         n_long = len(long_stocks)
         n_short = len(short_stocks)

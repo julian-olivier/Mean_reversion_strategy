@@ -91,7 +91,7 @@ def find_cointegrated_pairs(
 
         res = test_pair_cointegration(s_a, s_b)
 
-        if res['p_value'] <= p_value_threshold or res['adf_pvalue'] <= p_value_threshold:
+        if res['p_value'] <= p_value_threshold:
             cointegrated_pairs.append({
                 'Stock_Y': ticker_a,
                 'Stock_X': ticker_b,
@@ -105,7 +105,7 @@ def find_cointegrated_pairs(
 
     results_df = pd.DataFrame(cointegrated_pairs)
     if not results_df.empty:
-        results_df = results_df.sort_values(by='ADF_PValue').reset_index(drop=True)
+        results_df = results_df.sort_values(by='Coint_PValue').reset_index(drop=True)
     return results_df
 
 
@@ -133,21 +133,21 @@ def test_stationarity_consistency(
     y_out = series_y.iloc[split_idx:]
     x_out = series_x.iloc[split_idx:]
 
-    # In-sample model
+    # In-sample cointegration test (Engle-Granger test p-value to avoid OLS fitting bias)
+    coint_stat_in, pval_in, _ = coint(y_in, x_in)
     spread_in, beta, alpha = calculate_spread(y_in, x_in)
-    adf_in = adfuller(spread_in.dropna(), maxlag=1)
 
-    # Out-of-sample spread using in-sample parameters
+    # Out-of-sample spread using in-sample parameters (ADF test valid on fixed spread)
     spread_out = y_out - (beta * x_out + alpha)
     adf_out = adfuller(spread_out.dropna(), maxlag=1)
 
-    in_stationary = adf_in[1] <= 0.05
+    in_stationary = pval_in <= 0.05
     out_stationary = adf_out[1] <= 0.05
 
     return {
         'Stock_Y': stock_y,
         'Stock_X': stock_x,
-        'InSample_ADF_PValue': adf_in[1],
+        'InSample_ADF_PValue': pval_in,
         'InSample_IsStationary': in_stationary,
         'OutSample_ADF_PValue': adf_out[1],
         'OutSample_IsStationary': out_stationary,
@@ -209,8 +209,8 @@ def select_top_distinct_pairs(
     if cointegrated_df.empty:
         return pd.DataFrame()
 
-    # Sort by strongest ADF stationarity (lowest ADF_Stat / lowest PValue)
-    sorted_df = cointegrated_df.sort_values(by=['ADF_Stat', 'ADF_PValue'], ascending=[True, True]).reset_index(drop=True)
+    # Sort by strongest cointegration (lowest Coint_PValue / lowest ADF_Stat)
+    sorted_df = cointegrated_df.sort_values(by=['Coint_PValue', 'ADF_Stat'], ascending=[True, True]).reset_index(drop=True)
 
     if allow_stock_reuse:
         return sorted_df.head(max_pairs)

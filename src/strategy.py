@@ -44,7 +44,8 @@ def fit_vasicek_model(spread: pd.Series, dt: float = 1.0) -> dict:
     a = model.params.iloc[0]
     b = model.params.iloc[1]
     residuals = model.resid
-    res_std = residuals.std()
+    n_res = len(residuals)
+    res_std = np.sqrt(np.sum(residuals**2) / (n_res - 2)) if n_res > 2 else residuals.std()
 
     if b >= 1.0 or b <= 0.0:
         # Handle non-stationary / weak mean reversion edge case

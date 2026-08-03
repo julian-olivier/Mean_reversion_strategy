@@ -45,9 +45,9 @@ def fetch_top_100_data(
     try:
         raw_data = yf.download(tickers, period=period, progress=False)
         if isinstance(raw_data.columns, pd.MultiIndex):
-            if 'Adj Close' in raw_data.columns.levels[0]:
+            if 'Adj Close' in raw_data.columns.get_level_values(0):
                 prices = raw_data['Adj Close']
-            elif 'Close' in raw_data.columns.levels[0]:
+            elif 'Close' in raw_data.columns.get_level_values(0):
                 prices = raw_data['Close']
             else:
                 prices = raw_data.xs(raw_data.columns.levels[0][0], axis=1, level=0)
