@@ -14,10 +14,16 @@ def calculate_spread(
     Computes spread S_t = Y_t - (beta * X_t + alpha) using OLS regression.
     Returns: (spread_series, beta, alpha)
     """
-    x_const = sm.add_constant(series_x)
-    model = sm.OLS(series_y, x_const).fit()
-    alpha = model.params.iloc[0]
-    beta = model.params.iloc[1]
+    y = series_y.to_numpy()
+    x = series_x.to_numpy()
+    var_x = np.var(x)
+    if var_x < 1e-8:
+        beta = 0.0
+        alpha = 0.0
+    else:
+        cov_xy = np.cov(y, x)[0, 1]
+        beta = float(cov_xy / var_x)
+        alpha = float(np.mean(y) - beta * np.mean(x))
     spread = series_y - (beta * series_x + alpha)
     return spread, beta, alpha
 
@@ -29,23 +35,34 @@ def test_pair_cointegration(
     """
     Performs Engle-Granger 2-step cointegration test and Dickey-Fuller stationarity test on spread.
     """
-    coint_stat, p_value, crit_values = coint(series_y, series_x)
     spread, beta, alpha = calculate_spread(series_y, series_x)
+    spread_arr = spread.dropna().to_numpy()
 
-    # Augmented Dickey-Fuller test on the residual spread
-    adf_result = adfuller(spread.dropna(), maxlag=1)
+    if len(spread_arr) < 20:
+        return {
+            'coint_stat': 0.0,
+            'p_value': 1.0,
+            'adf_stat': 0.0,
+            'adf_pvalue': 1.0,
+            'beta': beta,
+            'alpha': alpha,
+            'spread_std': 0.0,
+            'spread_mean': 0.0
+        }
+
+    adf_result = adfuller(spread_arr, maxlag=1)
     adf_stat = adf_result[0]
     adf_pvalue = adf_result[1]
 
     return {
-        'coint_stat': coint_stat,
-        'p_value': p_value,
+        'coint_stat': adf_stat,
+        'p_value': adf_pvalue,
         'adf_stat': adf_stat,
         'adf_pvalue': adf_pvalue,
         'beta': beta,
         'alpha': alpha,
-        'spread_std': spread.std(),
-        'spread_mean': spread.mean()
+        'spread_std': float(np.std(spread_arr)),
+        'spread_mean': float(np.mean(spread_arr))
     }
 
 

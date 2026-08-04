@@ -726,6 +726,7 @@ def run_dynamic_multi_pair_portfolio_backtest(
     min_cluster_size: int = 2,
     train_ratio: float = 0.7,
     use_out_of_sample_only: bool = True,
+    quarterly_rebalance_freq: int = 63,
     verbose: bool = False
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
     """
@@ -942,7 +943,9 @@ def run_dynamic_multi_pair_portfolio_backtest(
                 targ_w = target_weights[pk]
                 weight_drift = max(weight_drift, abs(targ_w - curr_w))
 
-        if entry_exit_occurred or (len(active_positions_pairs) > 0 and weight_drift >= rebalance_threshold):
+        is_quarterly_day = (step > 0 and step % quarterly_rebalance_freq == 0)
+
+        if entry_exit_occurred or (len(active_positions_pairs) > 0 and (weight_drift >= rebalance_threshold or is_quarterly_day)):
             rebalance_today = True
             rebalance_count += 1
 
