@@ -331,13 +331,13 @@ def fetch_spx_benchmark(price_index: pd.DatetimeIndex, ticker: str = '^GSPC') ->
 def run_multi_pair_portfolio_backtest(
     prices: pd.DataFrame,
     selected_pairs_df: pd.DataFrame,
-    entry_z: float = 2.0,
+    entry_z: float = 3.0,
     stop_z: float = 3.5,
     max_holding_days: int = 20,
     transaction_cost: float = 0.0005,
     rebalance_threshold: float = 0.05,
     train_ratio: float = 0.7,
-    use_out_of_sample_only: bool = True
+    use_out_of_sample_only: bool = False
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
     """
     Backtests a multi-pair statistical arbitrage portfolio:
@@ -711,13 +711,12 @@ def calculate_portfolio_vs_benchmark_metrics(
 
     return summary_dict
 
-
 def run_dynamic_multi_pair_portfolio_backtest(
     prices: pd.DataFrame,
     lookback_window: int = 252,
     reselect_frequency: int = 63,
     max_pairs: int = 10,
-    entry_z: float = 2.0,
+    entry_z: float = 3.0,
     stop_z: float = 3.5,
     max_holding_days: int = 20,
     transaction_cost: float = 0.0005,
